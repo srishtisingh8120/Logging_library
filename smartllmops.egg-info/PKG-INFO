@@ -1,8 +1,0 @@
-Metadata-Version: 2.4
-Name: smartllmops
-Version: 0.1.0
-Summary: A lightweight SDK for tracing and observability in RAG applications.
-Author-email: Srishti J Singh <srishti.singh@sigmoidanlytics.com>
-Requires-Python: >=3.8
-Requires-Dist: requests
-Requires-Dist: azure-cosmos
