@@ -22,7 +22,8 @@ class SDKTracer:
         environment="prod",
         model=None,
         provider=None,
-        tags=None
+        tags=None,
+        framework=None
     ):
         self.telemetry = telemetry
         self.application_name = (
@@ -34,15 +35,49 @@ class SDKTracer:
         self.tags = tags or {}
         self.model = model or "unknown"
         self.provider = provider or "unknown"
+        self.framework = framework
         self.enrichers = {
             "llm": self._enrich_llm,
             "retrieval": self._enrich_retrieval,
             "tool": self._enrich_tool,
             "planner": self._enrich_planner,
             "intent-classification": self._enrich_intent,
+            "query-rewrite": self._enrich_query_rewrite,
             "chain": self._enrich_chain,
             "agent": self._enrich_agent,
         }
+
+    def _map_observation_type(self, span_type: str) -> str:
+        mapping = {
+            "llm": "GENERATION",
+            "chat-completion": "GENERATION",
+
+            "retrieval": "RETRIEVER",
+            "vector-search": "RETRIEVER",
+
+            "tool": "TOOL",
+            "api-call": "TOOL",
+            "sql-query": "TOOL",
+
+            "planner": "AGENT",
+            "router": "AGENT",
+            "tool-selection": "AGENT",
+            "agent": "AGENT",
+
+            "intent-classification": "CHAIN",
+            "query-rewrite": "CHAIN",
+            "chain": "CHAIN",
+            "workflow": "CHAIN",
+
+            "embedding": "EMBEDDING",
+
+            "evaluation": "EVALUATOR",
+
+            "guardrail": "GUARDRAIL",
+
+            "event": "EVENT",
+        }
+        return mapping.get((span_type or "").lower(), "SPAN")
 
     # ---------------------------------------------------------
     # TRACE INITIALIZATION
@@ -146,6 +181,7 @@ class SDKTracer:
             "step_number",
             "iteration",
             "tool_name",
+            "agent_name",
         ]
         for param in common_params:
             if param in kwargs:
@@ -254,7 +290,7 @@ class SDKTracer:
                 for item in safe_docs:
                     # In case of (doc, score) or just doc
                     doc = item[0] if isinstance(item, (list, tuple)) else item
-                    docs_metadata.append({"content_preview": getattr(doc, "page_content", str(doc))})
+                    docs_metadata.append({"content_preview": getattr(doc, "page_content", getattr(doc, "text", getattr(doc, "content", str(doc))))})
             metadata["documents"] = docs_metadata
             
             metadata["scores"] = [
@@ -298,6 +334,13 @@ class SDKTracer:
                 metadata["_provider_raw_usage"] = output[1]
 
         return {"metadata": metadata, "usage": usage}
+
+    def _enrich_query_rewrite(self, output, args, kwargs):
+        return {
+            "metadata": {
+                "rewritten_query": output
+            }
+        }
 
     def _enrich_chain(self, output, args, kwargs):
         return {
@@ -424,6 +467,10 @@ class SDKTracer:
         final_usage = (usage or {}).copy()
         final_metadata.update(error_metadata or {})
 
+        # Normalize legacy types
+        if span_type == "chain":
+            span_type = "query-rewrite"
+
         # --- SMART DECLARATIVE PARSING ---
         if status == "success":
             # 1. Use manual result_parser if provided (for backward compatibility)
@@ -462,6 +509,26 @@ class SDKTracer:
                     except Exception as e:
                         final_metadata["_enricher_error"] = str(e)
 
+        # --- SEMANTIC METADATA CONVENTIONS ---
+        canonical_type = self._map_observation_type(span_type)
+        final_metadata["smartllmops.observation.type"] = canonical_type
+        final_metadata["smartllmops.subtype"] = span_type or "generic"
+
+        if canonical_type == "GENERATION":
+            final_metadata["gen_ai.operation.name"] = "chat"
+        elif canonical_type == "RETRIEVER":
+            final_metadata["gen_ai.operation.name"] = "retrieve"
+        elif canonical_type == "TOOL":
+            final_metadata["gen_ai.tool.name"] = final_metadata.get("tool_name") or span_name
+        elif canonical_type == "AGENT":
+            final_metadata["gen_ai.agent.name"] = final_metadata.get("agent_name") or span_name
+
+        # Add workflow metadata if available
+        if "step_number" in final_metadata:
+            final_metadata["workflow.step"] = final_metadata["step_number"]
+        if "iteration" in final_metadata:
+            final_metadata["workflow.iteration"] = final_metadata["iteration"]
+
         # --- LAZY SPAN NAMING ---
         final_span_name = span_name
         if "{provider}" in final_span_name:
@@ -473,7 +540,8 @@ class SDKTracer:
             "span_id": span_id,
             "parent_span_id": effective_parent,
             "sequence": len(spans) + 1,
-            "type": span_type or "generic",
+            "observation_type": canonical_type,
+            "subtype": span_type or "generic",
             "name": final_span_name,
             "start_time": start_time,
             "end_time": end_time,
@@ -636,7 +704,7 @@ class SDKTracer:
                 total_usage["total_tokens"] += span_usage.get("total_tokens", 0)
 
             # 2. Capture dynamic provider/model from span metadata (prefer LLM spans)
-            if span["type"] == "llm" or span["metadata"].get("_provider_detected"):
+            if span.get("subtype") == "llm" or span["metadata"].get("_provider_detected"):
                 if span["metadata"].get("_provider_detected"):
                     detected_provider = span["metadata"]["_provider_detected"]
                 
@@ -644,7 +712,7 @@ class SDKTracer:
                 if real_model:
                     detected_model = real_model
                 
-                if span["type"] == "llm":
+                if span.get("subtype") == "llm":
                     llm_span_count += 1
 
             # 3. Merge raw usage details (from any span with raw data)
@@ -662,7 +730,7 @@ class SDKTracer:
                         provider_raw_sum[k] = provider_raw_sum.get(k, 0) + v
             
             # 2. Extract rag_docs if not manually provided
-            if span["type"] == "retrieval" and not detected_rag_docs:
+            if span.get("subtype") == "retrieval" and not detected_rag_docs:
                 docs = span["metadata"].get("documents", [])
                 scores = span["metadata"].get("scores", [])
                 if docs and scores:
@@ -695,6 +763,7 @@ class SDKTracer:
             "tags": self.tags,
 
             "environment": self.environment,
+            "framework": self.framework,
             "provider": detected_provider,
             "model": detected_model,
             "input": {"query": query},

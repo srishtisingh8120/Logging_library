@@ -1,8 +1,27 @@
 import os
+try:
+    from dotenv import load_dotenv
+    # Resolve the library's absolute root directory where its .env is located
+    lib_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_path = os.path.join(lib_root, ".env")
+    load_dotenv(dotenv_path=env_path)
+except ImportError:
+    pass
+
 from .sdk import SDKTracer
 from .transport import Telemetry
 
-def init(cosmos_conn=None, db_name=None, container_name=None, application_name=None, environment="prod", model=None, provider=None, tags=None):
+def init(
+    cosmos_conn=None,
+    db_name=None,
+    container_name=None,
+    application_name=None,
+    environment="prod",
+    framework=None,
+    model=None,
+    provider=None,
+    tags=None
+):
     """Initializes and returns a tracer instance with optional auto-patching."""
     
     # Auto-load from environment if not provided
@@ -11,8 +30,7 @@ def init(cosmos_conn=None, db_name=None, container_name=None, application_name=N
     container_name = container_name or os.getenv("COSMOS_CONTAINER")
     
     if not cosmos_conn:
-        print("⚠️ smartllmops: COSMOS_CONN_WRITE not found. Telemetry disabled.")
-        return None
+        print("⚠️ smartllmops: COSMOS_CONN_WRITE not found. Falling back to local offline logging.")
 
     telemetry = Telemetry(
         cosmos_conn=cosmos_conn,
@@ -24,6 +42,7 @@ def init(cosmos_conn=None, db_name=None, container_name=None, application_name=N
         telemetry,
         application_name=application_name,
         environment=environment,
+        framework=framework,
         model=model,
         provider=provider,
         tags=tags

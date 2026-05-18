@@ -1,6 +1,6 @@
 # SmartLLMOps SDK
 
-A lightweight, declarative SDK for high-fidelity tracing and observability in RAG and Agentic LLM applications.
+A lightweight, declarative, and framework-agnostic SDK for high-fidelity tracing and observability in RAG and Agentic LLM applications.
 
 ## 🚀 Installation
 
@@ -15,36 +15,40 @@ pip install -e /path/to/smartllmops-sdk
 pip install git+https://github.com/srishtisingh2026/Logging_library.git
 ```
 
-## ⚙️ Configuration
+## ⚙️ Configuration (Zero-Config Library Loading)
 
-The SDK uses environment variables for destination logging (e.g., Cosmos DB).
+All database connection credentials are **automatically and explicitly loaded by the SDK from the logging library's own `.env` file** upon import. 
 
-| Variable | Description |
-|----------|-------------|
-| `COSMOS_CONN_WRITE` | Primary connection string for Azure Cosmos DB |
-| `COSMOS_DB` | Database name (default: `llmops-data`) |
-| `COSMOS_CONTAINER` | Container name (default: `raw_traces`) |
-| `SMART_LLMOPS_APP` | Application name for grouping traces (optional) |
+**There is absolutely no need to define, set up, or pass connection credentials inside your monitored application's workspace or system environment.** The database endpoints are fully managed and encapsulated within the library!
+
+| Variable | Location | Description | Default |
+|----------|----------|-------------|---------|
+| `COSMOS_CONN_WRITE` | Library's `.env` | Primary connection string for Azure Cosmos DB | *Pre-configured* |
+| `COSMOS_DB` | Library's `.env` | Database name | `llmops-data` |
+| `COSMOS_CONTAINER` | Library's `.env` | Container name | `raw_traces` |
+| `SMART_LLMOPS_APP` | Application environment | Application name for grouping traces | `default-app` |
+
+---
 
 ## 🛠️ Quick Start
 
 ### 1. Initialize the Tracer
-Initialize the tracer once in your application (e.g., `app.py`).
+Simply call `init()` without database arguments in your monitored application. The SDK automatically resolves the pre-configured parameters from its internal settings.
 
 ```python
 import smartllmops
 
-# Initialize with application identity and environment
-# (model and provider are optional; they are auto-detected at runtime for supported LLMs)
+# No need to manage Cosmos credentials—they are loaded natively by the library!
 tracer = smartllmops.init(
     application_name="my-portfolio-analyst",
     environment="production",
+    framework="langchain",  # Optional: logs framework source at trace level
     tags={"version": "1.0.2", "team": "fin-tech"}
 )
 ```
 
 ### 2. Decorate your Functions
-Use the `@trace` decorator to capture execution flow, inputs/outputs, and metadata automatically.
+Use the `@trace` decorator to capture execution flow, parent-child hierarchies, latencies, and metadata.
 
 ```python
 @tracer.trace(span_type="llm", name="my_llm_span")
@@ -53,16 +57,31 @@ def get_llm_response(prompt):
     return content, prompt, usage_metadata
 ```
 
-#### Supported Span Types
-The SDK performs "Smart Parsing" based on the `span_type`:
-- `intent-classification`: Captures detected labels and token usage.
-- `chain`: Captures rewritten queries or intermediate reasoning.
-- `retrieval`: Captures document snippets and similarity scores.
-- `llm`: Captures detailed token usage (prompt, completion, total) and context token counts.
-- `agent`: Captures agent internal plans (from raw responses) and structured final outputs.
+---
 
-### 3. Trace Life Cycle
-Wrap your main entry point (pipeline) with `start_trace` and `export_trace`.
+## 📊 AI Execution Telemetry & Semantic Layer
+
+Rather than flattening AI traces into generic spans, the SDK enforces a **canonical semantic layer** mapping application-defined subtypes to standard high-level AI operation types.
+
+### Canonical Taxonomy (`observation_type`)
+* `GENERATION` — Text generations and completions (standardized with `gen_ai.operation.name="chat"`)
+* `RETRIEVER` — Database or document search (standardized with `gen_ai.operation.name="retrieve"`)
+* `TOOL` — External tool/function execution (standardized with `gen_ai.tool.name`)
+* `AGENT` — LLM reasoning, decision-making, and planners (standardized with `gen_ai.agent.name`)
+* `CHAIN` — Sequential pipeline workflows and prompt rewrites
+* `SPAN` — Standard application execution trace
+* `EMBEDDING` / `EVALUATOR` / `GUARDRAIL` / `EVENT`
+
+### Auto-Enriched Metadata
+Spans logged under specific subtypes are automatically parsed and structured:
+* **`llm` / `chat-completion`**: Extracts model name, system tags, raw token counts, and token cost variables.
+* **`retrieval`**: Extracts document snippets, scores, similarity distances, and parses document fields (`page_content`, `text`, `content`) for full framework interoperability.
+* **`workflow` step parameters**: Automatically maps `step_number` to `workflow.step` and `iteration` to `workflow.iteration`.
+
+---
+
+## 🔄 Trace Life Cycle
+Wrap your master pipeline run with standard trace initialization and export methods.
 
 ```python
 def run_pipeline(user_query):
@@ -70,7 +89,7 @@ def run_pipeline(user_query):
     tracer.start_trace()
     
     try:
-        # B. Run your logic
+        # B. Run your logic (decorated spans will naturally nest hierarchically)
         result = my_rag_engine.run(user_query)
         
         # C. Export the completed trace
@@ -82,10 +101,5 @@ def run_pipeline(user_query):
         )
         return result
     except Exception as e:
-        # Trace is automatically updated with Error status if using decorators
         raise e
 ```
-
-## 📊 Telemetry
-Traces are automatically upserted to your configured Azure Cosmos DB container for dashboarding.
-
