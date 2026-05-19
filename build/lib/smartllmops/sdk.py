@@ -20,7 +20,6 @@ _global_lock = threading.Lock()
 _global_session_traces: Dict[str, str] = {}  # session_id -> trace_id
 _global_trace_spans: Dict[str, list] = collections.defaultdict(list)  # trace_id -> spans
 _global_trace_stacks: Dict[str, list] = collections.defaultdict(list)  # trace_id -> stack
-_global_in_flight_spans: Dict[str, dict] = collections.defaultdict(dict)  # trace_id -> {span_id -> span_info}
 
 
 def _extract_session_id(args, kwargs) -> str:
@@ -478,7 +477,7 @@ class SDKTracer:
     # SPAN EXECUTION CORE
     # ---------------------------------------------------------
 
-    def _before_span(self, func, name, parent_span_id, session_id=None, span_type=None):
+    def _before_span(self, func, name, parent_span_id, session_id=None):
 
         if session_id:
             with _global_lock:
@@ -494,7 +493,6 @@ class SDKTracer:
                 with _global_lock:
                     _global_session_traces[session_id] = _trace_id_var.get()
 
-        trace_id = _trace_id_var.get()
         span_name = name or func.__name__
         span_id = f"span-{uuid.uuid4().hex[:8]}"
         start_time = int(time.time() * 1000)
@@ -506,15 +504,6 @@ class SDKTracer:
 
         stack = stack + [span_id]
         _stack_var.set(stack)
-
-        if trace_id:
-            with _global_lock:
-                _global_in_flight_spans[trace_id][span_id] = {
-                    "name": span_name,
-                    "start_time": start_time,
-                    "parent_span_id": effective_parent,
-                    "span_type": span_type or "generic"
-                }
 
         return span_id, span_name, start_time, effective_parent
 
@@ -543,14 +532,6 @@ class SDKTracer:
         if stack:
             stack = stack[:-1]
             _stack_var.set(stack)
-
-        end_time = int(time.time() * 1000)
-        trace_id = _trace_id_var.get()
-
-        if trace_id:
-            with _global_lock:
-                if trace_id in _global_in_flight_spans:
-                    _global_in_flight_spans[trace_id].pop(span_id, None)
 
         end_time = int(time.time() * 1000)
         trace_id = _trace_id_var.get()
@@ -652,12 +633,7 @@ class SDKTracer:
         trace_id_now = _trace_id_var.get()
         if trace_id_now:
             with _global_lock:
-                # Merge spans in global list to protect against concurrent task race conditions
-                existing = _global_trace_spans.get(trace_id_now, [])
-                for s in spans:
-                    if not any(x["span_id"] == s["span_id"] for x in existing):
-                        existing.append(s)
-                _global_trace_spans[trace_id_now] = existing
+                _global_trace_spans[trace_id_now] = spans
                 _global_trace_stacks[trace_id_now] = stack
 
     # ---------------------------------------------------------
@@ -686,7 +662,7 @@ class SDKTracer:
         if is_async:
 
             async def wrapper():
-                span_id, span_name, start_time, parent = self._before_span(func, name, parent_span_id, session_id=session_id, span_type=span_type)
+                span_id, span_name, start_time, parent = self._before_span(func, name, parent_span_id, session_id=session_id)
                 status = "success"
                 output = None
                 error_meta = {}
@@ -712,7 +688,7 @@ class SDKTracer:
 
         else:
 
-            span_id, span_name, start_time, parent = self._before_span(func, name, parent_span_id, session_id=session_id, span_type=span_type)
+            span_id, span_name, start_time, parent = self._before_span(func, name, parent_span_id, session_id=session_id)
             status = "success"
             output = None
             error_meta = {}
@@ -801,46 +777,7 @@ class SDKTracer:
                     spans = _global_trace_spans.get(t_id, [])
         
         if not spans:
-            spans = list(_spans_var.get())
-
-        # Dynamic stitch/flush of any active in-flight spans (e.g. final report generation span)
-        if trace_id:
-            with _global_lock:
-                in_flight = _global_in_flight_spans.get(trace_id, {})
-                for span_id, info in list(in_flight.items()):
-                    if not any(s.get("span_id") == span_id for s in spans):
-                        span_name = info["name"]
-                        start_time = info["start_time"]
-                        parent = info["parent_span_id"]
-                        stype = info["span_type"]
-                        end_time = int(time.time() * 1000)
-                        
-                        # Dynamically parse outputs and usage from the final trace export payload
-                        parsed = self._generic_parse(output, (), {}, stype, include_io=True)
-                        final_metadata = parsed.get("metadata", {}).copy()
-                        final_usage = parsed.get("usage", {}).copy()
-                        
-                        canonical_type = self._map_observation_type(stype)
-                        final_metadata["smartllmops.observation.type"] = canonical_type
-                        final_metadata["smartllmops.subtype"] = stype or "generic"
-                        
-                        span = {
-                            "trace_id": trace_id,
-                            "span_id": span_id,
-                            "parent_span_id": parent,
-                            "sequence": len(spans) + 1,
-                            "observation_type": canonical_type,
-                            "subtype": stype or "generic",
-                            "name": span_name,
-                            "start_time": start_time,
-                            "end_time": end_time,
-                            "latency_ms": max(end_time - start_time, 0),
-                            "status": "success",
-                            "metadata": final_metadata,
-                            "usage": final_usage,
-                        }
-                        spans.append(span)
-                        _global_in_flight_spans[trace_id].pop(span_id, None)
+            spans = _spans_var.get()
 
         # Aggregation Logic
         detected_provider = self.provider
@@ -966,7 +903,6 @@ class SDKTracer:
                 _global_session_traces.pop(session_id, None)
                 _global_trace_spans.pop(trace_id, None)
                 _global_trace_stacks.pop(trace_id, None)
-                _global_in_flight_spans.pop(trace_id, None)
 
         return trace
 
