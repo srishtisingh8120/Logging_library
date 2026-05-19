@@ -180,7 +180,7 @@ class SDKTracer:
                 break
 
         # Standard (OpenAI/Groq style)
-        if "prompt_tokens" in usage or "completion_tokens" in usage or "total_tokens" in usage:
+        if "prompt_tokens" in usage or "completion_tokens" in usage or ("total_tokens" in usage and "input_tokens" not in usage):
             prompt = int(usage.get("prompt_tokens", 0) or 0)
             completion = int(usage.get("completion_tokens", 0) or 0)
             total = int(usage.get("total_tokens", prompt + completion))
@@ -214,6 +214,53 @@ class SDKTracer:
             }
         #Fallback for unknown formats
         return {}
+
+    def _find_usage_in_object(self, obj, depth=0):
+        if depth > 6 or obj is None:
+            return None
+        
+        # 1. Direct usage attributes
+        if isinstance(obj, dict):
+            for key in ["usage", "token_usage", "usage_metadata"]:
+                if key in obj and obj[key]:
+                    return obj[key]
+            # Langchain response metadata
+            if "response_metadata" in obj and isinstance(obj["response_metadata"], dict):
+                if "token_usage" in obj["response_metadata"]:
+                    return obj["response_metadata"]["token_usage"]
+        elif hasattr(obj, "usage_metadata") and obj.usage_metadata:
+            return obj.usage_metadata
+        elif hasattr(obj, "response_metadata") and isinstance(obj.response_metadata, dict):
+            if "token_usage" in obj.response_metadata:
+                return obj.response_metadata["token_usage"]
+        elif hasattr(obj, "usage") and obj.usage:
+            return obj.usage
+            
+        # 2. Recurse into structures
+        if isinstance(obj, dict):
+            for v in obj.values():
+                res = self._find_usage_in_object(v, depth + 1)
+                if res: return res
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                res = self._find_usage_in_object(v, depth + 1)
+                if res: return res
+        else:
+            # LangGraph Command object
+            if hasattr(obj, "update") and obj.update:
+                res = self._find_usage_in_object(obj.update, depth + 1)
+                if res: return res
+            
+            # Pydantic or dataclass fallback
+            try:
+                if hasattr(obj, "__dict__"):
+                    for v in obj.__dict__.values():
+                        res = self._find_usage_in_object(v, depth + 1)
+                        if res: return res
+            except:
+                pass
+                
+        return None
 
     def _generic_parse(self, output, args, kwargs, span_type, include_io=True):
         metadata = {}
@@ -250,12 +297,8 @@ class SDKTracer:
                 metadata[param] = kwargs[param]
 
         # 3. Token Usage Heuristics
-        # Look for usage in output (if it's a dict or has a usage attribute)
-        raw_usage = None
-        if isinstance(output, dict):
-            raw_usage = output.get("usage") or output.get("token_usage") or output.get("usage_metadata")
-        elif hasattr(output, "usage"):
-            raw_usage = output.usage
+        # Deeply inspect the output object to find usage metadata
+        raw_usage = self._find_usage_in_object(output)
 
         if raw_usage:
             normalized = self._normalize_usage(raw_usage)
