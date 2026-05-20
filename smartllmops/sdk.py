@@ -145,11 +145,26 @@ class SDKTracer:
     # TRACE INITIALIZATION
     # ---------------------------------------------------------
 
-    def start_trace(self):
-        _spans_var.set([])
-        _stack_var.set([])
-        trace_id = f"trace-{uuid.uuid4().hex[:8]}"
+    def start_trace(self, root_name="AI Workflow", root_type="workflow", force=False):
+        if _trace_id_var.get() and not force:
+            return  # Trace already active, prevent accidental reset
+            
+        trace_id = f"trace-{uuid.uuid4().hex[:6]}"
+        root_span_id = f"span-{uuid.uuid4().hex[:6]}"
+        
+        _spans_var.set([])  # Do not add to completed spans yet
+        _stack_var.set([root_span_id])
         _trace_id_var.set(trace_id)
+        
+        with _global_lock:
+            _global_trace_spans[trace_id] = []
+            _global_trace_stacks[trace_id] = [root_span_id]
+            _global_in_flight_spans[trace_id][root_span_id] = {
+                "name": root_name,
+                "start_time": int(time.time() * 1000),
+                "parent_span_id": None,
+                "span_type": root_type
+            }
 
     # ---------------------------------------------------------
     # USAGE NORMALIZATION
